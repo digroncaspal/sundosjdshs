@@ -278,6 +278,16 @@ body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(
           <div class="clock" id="clock">--:--:--</div>
         </div>
       </div>
+      <!-- 이름 직접 입력 (학번으로 못 찾을 때) -->
+      <div class="card" id="name-override-card" style="display:none;margin-bottom:14px">
+        <div class="card-label" style="color:var(--yellow)">이름 직접 입력</div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text2);margin-bottom:10px">미등록 학번 — 이름 입력 시 함께 기록 (선택사항)</div>
+        <input class="input-field" id="name-input" type="text" inputmode="text"
+          maxlength="10" placeholder="이름 입력" autocomplete="off"
+          style="font-size:20px;letter-spacing:2px"
+          oninput="onNameInput(this.value)"
+          onkeydown="if(event.key==='Enter')saveViolation()">
+      </div>
       <div class="card">
         <button class="save-btn" onclick="saveViolation()">단속 기록 저장</button>
         <div class="status-msg" id="status-msg"></div>
@@ -437,9 +447,9 @@ body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const ADMIN_IDS = ['1557'];
 // 세종대성고등학교 위치 (위도, 경도) 및 허용 반경
-const SCHOOL_LAT    = 36.49713137;
-const SCHOOL_LNG    = 127.2546814;
-const SCHOOL_RADIUS = 100; // 미터 (학교 반경 100m)
+const SCHOOL_LAT    = 36.4971332747623;
+const SCHOOL_LNG    = 127.254676040658;
+const SCHOOL_RADIUS = 300; // 미터 (학교 반경 300m)
 
 // ── 선도부원 명단 (하드코딩) ──
 const STAFF_DATA = {
@@ -544,6 +554,28 @@ function toast(msg, type) {
   }, 3000);
 }
 function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 출첵 재로그인 잠금 체크
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function checkAttendLock() {
+  const lockUntil = parseInt(localStorage.getItem('sbok_attend_lock') || '0');
+  const errEl = document.getElementById('auth-error');
+  const btnEl = document.getElementById('auth-btn');
+  if (Date.now() < lockUntil) {
+    const remain = Math.ceil((lockUntil - Date.now()) / 60000);
+    errEl.textContent = '출첵 완료 후 재로그인 잠금 중 (' + remain + '분 남음)';
+    errEl.style.color = 'var(--yellow)';
+    if (btnEl) btnEl.disabled = true;
+    // 1분마다 갱신
+    setTimeout(function() { checkAttendLock(); }, 60000);
+  } else {
+    errEl.textContent = '';
+    errEl.style.color = '';
+    if (btnEl) btnEl.disabled = false;
+    localStorage.removeItem('sbok_attend_lock');
+  }
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 로컬 스토리지
@@ -695,6 +727,9 @@ function exportCSV(type) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function clearLocal() {
   if (!confirm('로컬 데이터를 모두 초기화할까요?')) return;
+  // 기기 출첵 기록도 삭제
+  Object.keys(localStorage).filter(function(k) { return k.startsWith('sbok_attend_device_'); })
+    .forEach(function(k) { localStorage.removeItem(k); });
   ['sbok_v','sbok_a','sbok_staff','sbok_students','sbok_duty'].forEach(function(k) {
     localStorage.removeItem(k);
   });
@@ -722,6 +757,14 @@ function tryAuth() {
   const errEl = document.getElementById('auth-error');
   if (id.length !== 4) { errEl.textContent = '학번 4자리를 입력하세요.'; return; }
 
+  // 출첵 후 재로그인 잠금 확인 (관리자는 제외)
+  const isAdminId = ADMIN_IDS.indexOf(String(id).trim()) !== -1;
+  const lockUntil = parseInt(localStorage.getItem('sbok_attend_lock') || '0');
+  if (!isAdminId && Date.now() < lockUntil) {
+    const remain = Math.ceil((lockUntil - Date.now()) / 60000);
+    errEl.textContent = '출첵 완료 후 ' + remain + '분간 재로그인이 잠겨있습니다.';
+    return;
+  }
   const name = STAFF[String(id).trim()];
   if (!name) { errEl.textContent = '선도부원 명단에 없는 학번입니다.'; return; }
   currentRecorder = name;
@@ -741,6 +784,7 @@ function logout() {
   document.getElementById('auth-input').value = '';
   document.getElementById('auth-name-preview').textContent = '';
   document.getElementById('auth-error').textContent = '';
+  checkAttendLock();
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -808,14 +852,30 @@ function onStudentInput(val) {
   const v  = val.replace(/\D/g, '');
   document.getElementById('student-input').value = v;
   const el = document.getElementById('student-name');
+  const nameCard = document.getElementById('name-override-card');
+  const nameInput = document.getElementById('name-input');
   if (v.length === 4) {
     const name = lookupName(v);
-    el.textContent  = name || '학번 없음';
-    el.style.color  = name ? 'var(--green)' : 'var(--accent)';
+    if (name) {
+      el.textContent = name;
+      el.style.color = 'var(--green)';
+      nameCard.style.display = 'none';
+      nameInput.value = '';
+    } else {
+      el.textContent = '미등록 학번 (이름 입력 선택)';
+      el.style.color = 'var(--yellow)';
+      nameCard.style.display = 'block';
+    }
   } else {
-    el.textContent  = v.length > 0 ? '입력 중…' : '—';
-    el.style.color  = 'var(--text2)';
+    el.textContent = v.length > 0 ? '입력 중…' : '—';
+    el.style.color = 'var(--text2)';
+    nameCard.style.display = 'none';
+    nameInput.value = '';
   }
+}
+
+function onNameInput(val) {
+  document.getElementById('name-input').value = val;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -829,11 +889,11 @@ function saveViolation() {
     msgEl.className = 'status-msg err';
     return;
   }
-  const name = lookupName(sid);
+  let name = lookupName(sid);
   if (!name) {
-    msgEl.textContent = '등록되지 않은 학번입니다.';
-    msgEl.className = 'status-msg err';
-    return;
+    // 미등록 학번 — 직접 입력한 이름 있으면 사용, 없으면 학번으로 저장
+    const nameVal = document.getElementById('name-input').value.trim();
+    name = nameVal || sid;
   }
   const now     = new Date();
   const p       = getPeriod(now);
@@ -854,6 +914,8 @@ function saveViolation() {
   document.getElementById('student-input').value = '';
   document.getElementById('student-name').textContent = '—';
   document.getElementById('student-name').style.color = 'var(--text2)';
+  document.getElementById('name-input').value = '';
+  document.getElementById('name-override-card').style.display = 'none';
   msgEl.textContent = '✓ ' + name + '  ' + p.label + '  ' + timeStr;
   msgEl.className = 'status-msg ok';
   setTimeout(function() { msgEl.textContent = ''; }, 3000);
@@ -906,23 +968,46 @@ function saveAttend() {
     stEl.className = 'status-msg err';
     return;
   }
-  stEl.textContent = '위치 확인 중...';
+  stEl.textContent = '위치 확인 중... (GPS 신호 수신 중)';
   stEl.className = 'status-msg info';
+  // 1차: 고정밀 GPS 시도 (15초)
   navigator.geolocation.getCurrentPosition(
-    function(pos) { doSaveAttend(id, pos.coords.latitude, pos.coords.longitude); },
-    function(err) {
-      stEl.textContent = '위치 권한을 허용해주세요. (' + err.message + ')';
-      stEl.className = 'status-msg err';
+    function(pos) {
+      doSaveAttend(id, pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
     },
-    { enableHighAccuracy: true, timeout: 10000 }
+    function(err) {
+      // 실패 시 2차: 저정밀(Wi-Fi/네트워크) 재시도
+      stEl.textContent = 'GPS 신호 약함, 네트워크 위치로 재시도 중...';
+      navigator.geolocation.getCurrentPosition(
+        function(pos) {
+          doSaveAttend(id, pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
+        },
+        function(err2) {
+          stEl.textContent = '위치를 가져올 수 없습니다. 위치 권한을 확인하거나 실외에서 시도해주세요.';
+          stEl.className = 'status-msg err';
+        },
+        { enableHighAccuracy: false, timeout: 10000, maximumAge: 30000 }
+      );
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
   );
 }
 
-function doSaveAttend(id, lat, lng) {
+function doSaveAttend(id, lat, lng, accuracy) {
   const stEl = document.getElementById('attend-status');
+  // 기기당 오늘 1회 출첵 체크
+  const deviceKey = 'sbok_attend_device_' + getToday();
+  const deviceChecked = localStorage.getItem(deviceKey);
+  if (deviceChecked) {
+    stEl.textContent = '이 기기에서 오늘 이미 출첵했습니다. (' + deviceChecked + ')';
+    stEl.className = 'status-msg err';
+    return;
+  }
+
   const dist = calcDistance(lat, lng, SCHOOL_LAT, SCHOOL_LNG);
+  const acc  = accuracy ? Math.round(accuracy) : '?';
   if (dist > SCHOOL_RADIUS) {
-    stEl.textContent = '학교 밖에서는 출첵할 수 없습니다. (현재 위치: ' + Math.round(dist) + 'm 떨어짐)';
+    stEl.textContent = '학교 밖에서는 출첵할 수 없습니다. (' + Math.round(dist) + 'm / 정확도 ±' + acc + 'm)';
     stEl.className = 'status-msg err';
     return;
   }
@@ -954,6 +1039,8 @@ function doSaveAttend(id, lat, lng) {
   };
   attendances.unshift(rec);
   saveA();
+  // 기기에 오늘 출첵 완료 기록
+  localStorage.setItem(deviceKey, name + ' (' + rec.time + ')');
   apiPost(ATTEND_URL, {
     action: 'attend',
     studentId: rec.studentId,
@@ -968,6 +1055,8 @@ function doSaveAttend(id, lat, lng) {
   stEl.textContent = '✓ ' + name + ' 출석 완료 (' + rec.time + ')';
   stEl.className = 'status-msg ok';
   setTimeout(function() { stEl.textContent = ''; }, 3000);
+  // 출첵 완료 후 30분간 재로그인 잠금
+  localStorage.setItem('sbok_attend_lock', String(Date.now() + 30 * 60 * 1000));
   toast(name + ' 출석 체크', 'ok');
   document.getElementById('attend-input').focus();
   renderAttend();
@@ -1206,6 +1295,7 @@ function closeDetail() { document.getElementById('detail-panel').classList.remov
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 window.addEventListener('load', function() {
   loadLocal();
+  checkAttendLock();
   document.getElementById('auth-input').focus();
 });
 </script>
